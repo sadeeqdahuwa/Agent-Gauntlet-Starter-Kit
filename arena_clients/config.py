@@ -164,7 +164,13 @@ def get_arena_api_key(explicit: str | None = None) -> str:
 
 
 @lru_cache(maxsize=1)
-def ensure_connected(timeout_s: float = 3.0) -> None:
+def ensure_connected(timeout_s: float | None = None) -> None:
+    if timeout_s is None:
+        import os
+        try:
+            timeout_s = float(os.getenv("ARENA_CONNECT_TIMEOUT_S", "10.0"))
+        except (ValueError, TypeError):
+            timeout_s = 10.0
     """Fail fast when the starter kit is missing Agent Gauntlet connectivity config."""
     if not (_read_env("ARENA_SERVER") or _read_env("ARENA_API_BASE")):
         raise SystemExit(
@@ -182,31 +188,39 @@ def ensure_connected(timeout_s: float = 3.0) -> None:
     api_base = get_api_base()
     url = f"{api_base.rstrip('/')}/api/keys/validate"
 
-    try:
-        response = requests.get(
-            url,
-            headers={
-                "Accept": "application/json",
-                "X-Arena-API-Key": api_key,
-            },
-            timeout=timeout_s,
-        )
-        if response.status_code >= 400:
-            raise SystemExit(
-                f"Could not verify ARENA_API_KEY with the Agent Gauntlet Platform API at {api_base} "
-                f"(HTTP {response.status_code}). Check ARENA_SERVER and try again."
+    import time
+    last_exc = None
+    for attempt in range(3):
+        try:
+            response = requests.get(
+                url,
+                headers={
+                    "Accept": "application/json",
+                    "X-Arena-API-Key": api_key,
+                },
+                timeout=timeout_s,
             )
-        payload = response.json()
-    except requests.RequestException as exc:
-        raise SystemExit(
-            f"Could not reach the Agent Gauntlet Platform API at {api_base}. Check ARENA_SERVER "
-            "and your network connection."
-        ) from exc
-    except ValueError as exc:
-        raise SystemExit(
-            f"The Agent Gauntlet Platform API at {api_base} returned an invalid validation "
-            "response. Check that the server is running the expected build."
-        ) from exc
+            if response.status_code >= 400:
+                raise SystemExit(
+                    f"Could not verify ARENA_API_KEY with the Agent Gauntlet Platform API at {api_base} "
+                    f"(HTTP {response.status_code}). Check ARENA_SERVER and try again."
+                )
+            payload = response.json()
+            break
+        except requests.RequestException as exc:
+            last_exc = exc
+            if attempt < 2:
+                time.sleep(1.5)
+                continue
+            raise SystemExit(
+                f"Could not reach the Agent Gauntlet Platform API at {api_base}. Check ARENA_SERVER "
+                "and your network connection."
+            ) from exc
+        except ValueError as exc:
+            raise SystemExit(
+                f"The Agent Gauntlet Platform API at {api_base} returned an invalid validation "
+                "response. Check that the server is running the expected build."
+            ) from exc
 
     if not isinstance(payload, dict) or not bool(payload.get("valid")):
         raise SystemExit(
